@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../lib/api';
 import { useAuth } from '../context/AuthContext';
@@ -26,6 +26,8 @@ export default function Inbox() {
   const [loadingThread, setLoadingThread] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const fileInputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     fetchConversations();
@@ -70,14 +72,14 @@ export default function Inbox() {
 
   async function handleSend(e) {
     e.preventDefault();
-    if (!selectedUserId || !text.trim()) return;
+    if (!selectedUserId || (!text.trim() && !uploading)) return;
 
     setSending(true);
     setError('');
     try {
       const { data } = await api.post('/inbox/message', {
         to: selectedUserId,
-        text,
+        text: text.trim(),
       });
       setMessages((prev) => [...prev, data]);
       setText('');
@@ -86,6 +88,37 @@ export default function Inbox() {
       setError(err.response?.data?.message || 'Failed to send message.');
     } finally {
       setSending(false);
+    }
+  }
+
+  async function handleFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    setUploading(true);
+    setError('');
+    try {
+      const { data: uploadData } = await api.post('/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      const { data: msgData } = await api.post('/inbox/message', {
+        to: selectedUserId,
+        text: '',
+        fileUrl: uploadData.fileUrl,
+        fileType: uploadData.fileType,
+      });
+
+      setMessages((prev) => [...prev, msgData]);
+      fetchConversations();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to upload file.');
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   }
 
@@ -139,7 +172,18 @@ export default function Inbox() {
                   const mine = m.sender._id === user?.id;
                   return (
                     <div key={m._id} className={`message-bubble ${mine ? 'mine' : ''}`}>
-                      <p>{m.text}</p>
+                      {m.text && <p>{m.text}</p>}
+                      {m.fileUrl && (
+                        <div className="message-file">
+                          {m.fileType?.startsWith('image/') ? (
+                            <img src={m.fileUrl} alt="uploaded" style={{ maxWidth: '200px', borderRadius: '8px' }} />
+                          ) : (
+                            <a href={m.fileUrl} target="_blank" rel="noreferrer" className="file-link">
+                              📄 {m.fileUrl.split('/').pop()}
+                            </a>
+                          )}
+                        </div>
+                      )}
                       <small>{formatDate(m.createdAt)}</small>
                     </div>
                   );
@@ -149,14 +193,28 @@ export default function Inbox() {
 
             <form className="message-form" onSubmit={handleSend}>
               <input
+                type="file"
+                ref={fileInputRef}
+                style={{ display: 'none' }}
+                onChange={handleFileChange}
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading || sending}
+              >
+                📎
+              </button>
+              <input
                 type="text"
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 placeholder="Type a message..."
-                required
+                disabled={uploading}
               />
-              <button type="submit" className="btn btn-primary" disabled={sending}>
-                {sending ? 'Sending…' : 'Send'}
+              <button type="submit" className="btn btn-primary" disabled={sending || uploading}>
+                {sending ? 'Sending…' : uploading ? 'Uploading…' : 'Send'}
               </button>
             </form>
           </>

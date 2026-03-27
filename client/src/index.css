@@ -1,4 +1,10 @@
 /* ─── Design tokens ─────────────────────────────────────────── */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
 :root {
   --primary:       #2563eb;
   --primary-dark:  #1d4ed8;
