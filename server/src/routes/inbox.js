@@ -19,26 +19,26 @@ router.get('/conversations', auth, async (req, res) => {
 
     const seen = new Map();
 
-     for (const msg of messages) {
-       const isSentByMe = msg.sender._id.toString() === me;
-       const partner = isSentByMe ? msg.receiver : msg.sender;
-       const partnerId = partner._id.toString();
- 
-+      const unreadCount = await Message.countDocuments({
-+        sender: partnerId,
-+        receiver: me,
-+        isRead: false,
-+      });
-+
-       if (!seen.has(partnerId)) {
-         seen.set(partnerId, {
-           partner,
-           lastMessage: msg.text || (msg.fileUrl ? 'Shared a file' : ''),
-           lastAt: msg.createdAt,
-+          unreadCount,
-         });
-       }
-     }
+      for (const msg of messages) {
+        const isSentByMe = msg.sender._id.toString() === me;
+        const partner = isSentByMe ? msg.receiver : msg.sender;
+        const partnerId = partner._id.toString();
+
+        if (!seen.has(partnerId)) {
+          const unreadCount = await Message.countDocuments({
+            sender: partnerId,
+            receiver: me,
+            isRead: false,
+          });
+
+          seen.set(partnerId, {
+            partner,
+            lastMessage: msg.text || (msg.fileUrl ? 'Shared a file' : ''),
+            lastAt: msg.createdAt,
+            unreadCount,
+          });
+        }
+      }
 
     res.json(Array.from(seen.values()));
   } catch {
@@ -70,12 +70,12 @@ router.get('/thread/:userId', auth, async (req, res) => {
        .populate('receiver', AUTHOR_FIELDS)
        .sort({ createdAt: 1 });
  
-+    // Mark messages from partner to me as read
-+    await Message.updateMany(
-+      { sender: userId, receiver: me, isRead: false },
-+      { $set: { isRead: true } }
-+    );
-+
+    // Mark messages from partner to me as read
+    await Message.updateMany(
+      { sender: userId, receiver: me, isRead: false },
+      { $set: { isRead: true } }
+    );
+
      res.json({ partner, messages });
   } catch {
     res.status(500).json({ message: 'Server error' });

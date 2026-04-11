@@ -19,7 +19,22 @@ router.get('/', auth, async (req, res) => {
 router.get('/joined', auth, async (req, res) => {
   try {
     const groups = await Group.find({ members: req.user.id }).populate('owner', 'username');
-    res.json(groups);
+    
+    // Compute unread counts for each group
+    const groupsWithUnread = await Promise.all(groups.map(async (group) => {
+      const readStatus = await GroupRead.findOne({ user: req.user.id, group: group._id });
+      const lastReadAt = readStatus ? readStatus.lastReadAt : new Date(0);
+      
+      const unreadCount = await GroupMessage.countDocuments({
+        group: group._id,
+        createdAt: { $gt: lastReadAt },
+        sender: { $ne: req.user.id }
+      });
+      
+      return { ...group.toObject(), unreadCount };
+    }));
+
+    res.json(groupsWithUnread);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -28,6 +43,13 @@ router.get('/joined', auth, async (req, res) => {
 // Create a new group
 router.post('/', auth, async (req, res) => {
   const { name, description } = req.body;
+  
+  // Group name validation: subjectname_number(subject code)
+  const nameRegex = /^[a-zA-Z0-9\s]+_[0-9]+\([a-zA-Z0-9]+\)$/;
+  if (!nameRegex.test(name)) {
+    return res.status(400).json({ message: 'Invalid group name format. Use: SubjectName_Number(SubjectCode)' });
+  }
+
   try {
     const newGroup = new Group({
       name,

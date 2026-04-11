@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { Toaster } from 'react-hot-toast';
 import Navbar from './components/Navbar';
 import Register from './pages/Register';
 import Login from './pages/Login';
@@ -23,7 +24,8 @@ function GuestRoute({ children }) {
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <Toaster position="top-right" reverseOrder={false} />
+       <BrowserRouter>
         <Navbar />
         <main className="container">
           <Routes>

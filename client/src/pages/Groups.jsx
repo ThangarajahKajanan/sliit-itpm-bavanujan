@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { socket } from '../utils/socket';
+import toast from 'react-hot-toast';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
@@ -17,6 +18,7 @@ export default function Groups() {
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDesc, setNewGroupDesc] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [unreadCounts, setUnreadCounts] = useState({});
   const fileInputRef = useRef(null);
   
   const chatEndRef = useRef(null);
@@ -30,18 +32,62 @@ export default function Groups() {
       scrollToBottom();
     });
 
+    socket.on('group_notification', (data) => {
+       const { groupId } = data;
+       // Only increment if it's NOT the currently selected group
+       setUnreadCounts(prev => {
+         // If we are already looking at this group, don't increment
+         if (window.activeGroupId === groupId) return prev;
+         return {
+           ...prev,
+           [groupId]: (prev[groupId] || 0) + 1
+         };
+       });
+    });
+
     return () => {
       socket.off('receive_message');
+      socket.off('group_notification');
       socket.disconnect();
     };
   }, []);
 
   useEffect(() => {
     if (selectedGroup) {
+      window.activeGroupId = selectedGroup._id;
       fetchMessages(selectedGroup._id);
       socket.emit('join_group', selectedGroup._id);
+      
+      // Mark as read
+      socket.emit('mark_group_read', { userId: user.id, groupId: selectedGroup._id });
+      setUnreadCounts(prev => ({ ...prev, [selectedGroup._id]: 0 }));
     }
+    return () => {
+      window.activeGroupId = null;
+    };
   }, [selectedGroup]);
+
+  useEffect(() => {
+    // Handle switching groups when a notification is clicked
+    const handlePendingSelect = () => {
+      const pendingId = localStorage.getItem('pendingGroupSelect');
+      if (pendingId) {
+        const group = joinedGroups.find(g => g._id === pendingId);
+        if (group) {
+          setSelectedGroup(group);
+          localStorage.removeItem('pendingGroupSelect');
+        }
+      }
+    };
+
+    window.addEventListener('pendingGroupSelectChange', handlePendingSelect);
+    // Also check on mount in case we navigated from another page
+    handlePendingSelect();
+
+    return () => {
+      window.removeEventListener('pendingGroupSelectChange', handlePendingSelect);
+    };
+  }, [joinedGroups]);
 
   const fetchGroups = async () => {
     try {
@@ -51,6 +97,13 @@ export default function Groups() {
       ]);
       setAvailableGroups(allRes.data);
       setJoinedGroups(joinedRes.data);
+      
+      // Initialize unread counts
+      const counts = {};
+      joinedRes.data.forEach(g => {
+        counts[g._id] = g.unreadCount || 0;
+      });
+      setUnreadCounts(counts);
     } catch (err) {
       console.error('Error fetching groups', err);
     }
@@ -70,17 +123,29 @@ export default function Groups() {
 
   const handleCreateGroup = async (e) => {
     e.preventDefault();
+    
+    // Group name validation: subjectname_number(subject code)
+    const nameRegex = /^[a-zA-Z0-9\s]+_[0-9]+\([a-zA-Z0-9]+\)$/;
+    if (!nameRegex.test(newGroupName)) {
+      toast.error('Invalid format! Use: SubjectName_Number(SubjectCode)', {
+        duration: 4000,
+        position: 'top-center',
+      });
+      return;
+    }
+
     try {
       await axios.post(`${API_URL}/groups`, 
         { name: newGroupName, description: newGroupDesc },
         { headers: { Authorization: `Bearer ${token}` } }
       );
+      toast.success('Community Created Successfully!');
       setNewGroupName('');
       setNewGroupDesc('');
       setIsCreating(false);
       fetchGroups();
     } catch (err) {
-      alert('Error creating group');
+      toast.error(err.response?.data?.message || 'Error creating group');
     }
   };
 
@@ -89,10 +154,76 @@ export default function Groups() {
       await axios.post(`${API_URL}/groups/${groupId}/join`, {}, {
         headers: { Authorization: `Bearer ${token}` }
       });
+      toast.success('Joined Community!');
       fetchGroups();
     } catch (err) {
-      alert('Error joining group');
+      toast.error('Error joining group');
     }
+  };
+
+  const performLeave = async (groupToLeave) => {
+    try {
+      await axios.post(`${API_URL}/groups/${groupToLeave._id}/leave`, {}, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      toast.success(`Successfully left "${groupToLeave.name}"`, { icon: '👋' });
+      if (selectedGroup?._id === groupToLeave._id) {
+        setSelectedGroup(null);
+      }
+      fetchGroups();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Error leaving group');
+    }
+  };
+
+  const handleLeaveGroup = async (groupToLeave) => {
+    const isOwner = groupToLeave.owner._id === user.id || groupToLeave.owner === user.id;
+
+    toast((t) => (
+      <div className="p-1">
+        <div className="flex items-start gap-3">
+          <div className="text-2xl mt-0.5">
+            {isOwner ? '⚠️' : '🚪'}
+          </div>
+          <div className="flex-1">
+            <h4 className="text-sm font-bold text-gray-900">
+              {isOwner ? 'Owner Access Warning' : 'Leave Group?'}
+            </h4>
+            <p className="text-xs text-gray-600 mt-1 leading-relaxed">
+              {isOwner 
+                ? "You are the owner. If you leave, you lose access until you join back, but you will still be the owner. Proceed?"
+                : `Are you sure you want to leave "${groupToLeave.name}"?`}
+            </p>
+            <div className="flex justify-end gap-2 mt-4">
+              <button 
+                onClick={() => toast.dismiss(t.id)}
+                className="px-3 py-1 text-[10px] font-bold text-gray-500 hover:bg-gray-100 rounded-md transition-colors"
+              >
+                Go Back
+              </button>
+              <button 
+                onClick={() => {
+                  toast.dismiss(t.id);
+                  performLeave(groupToLeave);
+                }}
+                className={`px-3 py-1 text-[10px] font-bold text-white rounded-md transition-all ${isOwner ? 'bg-orange-500 hover:bg-orange-600' : 'bg-red-600 hover:bg-red-700'}`}
+              >
+                Yes, Leave
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    ), {
+      duration: 8000,
+      position: 'top-center',
+      style: {
+        minWidth: '320px',
+        padding: '16px',
+        borderRadius: '16px',
+        boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+      }
+    });
   };
 
   const handleSendMessage = (e) => {
@@ -136,9 +267,10 @@ export default function Groups() {
       };
 
       socket.emit('send_message', messageData);
+      toast.success('File shared successfully');
     } catch (err) {
       console.error('Error uploading file', err);
-      alert('Error uploading file');
+      toast.error('Error uploading file');
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -179,7 +311,7 @@ export default function Groups() {
               </button>
             </div>
           ))}
-          {availableGroups.length === joinedGroups.length && (
+          {availableGroups.filter(g => !joinedGroups.some(jg => jg._id === g._id)).length === 0 && (
             <p className="text-gray-500 text-sm italic">You've explored all available groups!</p>
           )}
         </div>
@@ -196,11 +328,18 @@ export default function Groups() {
                 onClick={() => setSelectedGroup(group)}
                 className={`p-4 cursor-pointer hover:bg-indigo-50 transition border-b flex items-center gap-3 ${selectedGroup?._id === group._id ? 'bg-indigo-100 border-l-4 border-l-indigo-600' : ''}`}
               >
-                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold">
+                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold flex-shrink-0">
                   {group.name.charAt(0)}
                 </div>
                 <div className="flex-1 truncate">
-                  <div className="font-medium text-gray-800">{group.name}</div>
+                  <div className="flex justify-between items-center">
+                    <div className="font-medium text-gray-800 truncate">{group.name}</div>
+                    {unreadCounts[group._id] > 0 && (
+                      <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[20px] text-center shadow-sm animate-pulse">
+                        {unreadCounts[group._id]}
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs text-gray-500 truncate">{group.description}</div>
                 </div>
               </div>
@@ -220,7 +359,6 @@ export default function Groups() {
                 </div>
                 <div className="flex gap-2">
                   <button className="p-2 text-gray-500 hover:text-indigo-600"><i className="fas fa-search"></i></button>
-                  <button className="p-2 text-gray-500 hover:text-red-600" title="Leave Group"><i className="fas fa-sign-out-alt"></i></button>
                 </div>
               </div>
 
@@ -247,7 +385,7 @@ export default function Groups() {
                           {msg.fileType?.startsWith('image/') ? (
                             <img src={msg.fileUrl} alt="uploaded" className="max-w-full rounded-lg shadow-sm" style={{ maxHeight: '250px' }} />
                           ) : (
-                            <a href={msg.fileUrl} target="_blank" rel="noreferrer" className="block p-2 bg-black/10 rounded text-xs flex items-center gap-2 underline">
+                            <a href={msg.fileUrl} target="_blank" rel="noreferrer" className="p-2 bg-black/10 rounded text-xs flex items-center gap-2 underline">
                               📄 {msg.fileUrl.split('/').pop()}
                             </a>
                           )}
@@ -264,6 +402,16 @@ export default function Groups() {
                   </div>
                 ))}
                 <div ref={chatEndRef} />
+              </div>
+
+              {/* Leave Community Button - Bottom Center */}
+              <div className="flex justify-center pb-2">
+                <button 
+                  onClick={() => handleLeaveGroup(selectedGroup)}
+                  className="text-[11px] font-bold text-red-500 hover:text-red-600 hover:bg-red-50 px-4 py-1 rounded-full transition-all flex items-center gap-1.5 border border-red-100 bg-white/80 shadow-sm"
+                >
+                  <i className="fas fa-sign-out-alt text-[10px]"></i> Leave this Community
+                </button>
               </div>
 
               {/* Message Input */}
@@ -318,35 +466,67 @@ export default function Groups() {
 
       {/* Create Group Modal */}
       {isCreating && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-8 w-full max-w-md shadow-2xl animate-in zoom-in-95 duration-200">
-            <h2 className="text-2xl font-bold text-gray-800 mb-6">Create New Community</h2>
-            <form onSubmit={handleCreateGroup} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Group Name</label>
-                <input 
-                  type="text" 
-                  required
-                  className="w-full border rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                  value={newGroupName}
-                  onChange={(e) => setNewGroupName(e.target.value)}
-                  placeholder="e.g. Data Structures 101"
-                />
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-300">
+            <div className="bg-gradient-to-r from-indigo-600 to-purple-700 p-6 text-white">
+              <h2 className="text-2xl font-bold">Launch New Community</h2>
+              <p className="text-indigo-100 text-sm mt-1">Start a space for collaborative learning</p>
+            </div>
+            
+            <form onSubmit={handleCreateGroup} className="p-8 space-y-6">
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">
+                   Group name (Required format: <span className="text-indigo-600 font-mono">Subject_Number(Code)</span>)
+                </label>
+                <div className="relative group">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-indigo-500 transition-colors">
+                    🏷️
+                  </span>
+                  <input 
+                    type="text" 
+                    required
+                    className="w-full border-2 border-gray-100 rounded-xl pl-10 pr-4 py-3 focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition-all"
+                    value={newGroupName}
+                    onChange={(e) => setNewGroupName(e.target.value)}
+                    placeholder="e.g. Mathematics_101(CS101)"
+                  />
+                </div>
+                <p className="text-[11px] text-gray-400 mt-1 italic">
+                  Example: DataStructures_2(IT2030) or Biology_101(BIO1)
+                </p>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                <textarea 
-                  required
-                  rows="3"
-                  className="w-full border rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                  value={newGroupDesc}
-                  onChange={(e) => setNewGroupDesc(e.target.value)}
-                  placeholder="Describe the purpose of this learning space..."
-                />
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">Description</label>
+                <div className="relative group">
+                  <span className="absolute left-3 top-4 text-gray-400 group-focus-within:text-indigo-500 transition-colors">
+                    📝
+                  </span>
+                  <textarea 
+                    required
+                    rows="3"
+                    className="w-full border-2 border-gray-100 rounded-xl pl-10 pr-4 py-3 focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition-all"
+                    value={newGroupDesc}
+                    onChange={(e) => setNewGroupDesc(e.target.value)}
+                    placeholder="Briefly describe what this community is about..."
+                  />
+                </div>
               </div>
+
               <div className="flex gap-4 pt-4">
-                <button type="button" onClick={() => setIsCreating(false)} className="flex-1 text-gray-600 font-medium py-2 rounded-lg hover:bg-gray-100 transition">Cancel</button>
-                <button type="submit" className="flex-1 bg-indigo-600 text-white font-medium py-2 rounded-lg hover:bg-indigo-700 transition shadow-lg shadow-indigo-200">Create</button>
+                <button 
+                  type="button" 
+                  onClick={() => setIsCreating(false)} 
+                  className="flex-1 text-gray-500 font-bold py-3 rounded-xl hover:bg-gray-100 transition-all border-2 border-transparent hover:border-gray-200"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit" 
+                  className="flex-1 bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 hover:scale-[1.02] active:scale-95 transition-all shadow-lg shadow-indigo-200"
+                >
+                  Create Group
+                </button>
               </div>
             </form>
           </div>

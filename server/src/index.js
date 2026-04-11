@@ -16,6 +16,7 @@ const groupRoutes = require('./routes/groups');
 const GroupMessage = require('./models/GroupMessage');
 const Message = require('./models/Message');
 const GroupRead = require('./models/GroupRead');
+const Group = require('./models/Group');
 
 const app = express();
 const server = require('http').createServer(app);
@@ -78,6 +79,11 @@ io.on('connection', (socket) => {
     console.log(`User joined private room: ${userId}`);
   });
 
+  socket.on('join_user', (userId) => {
+    socket.join(`user_${userId}`);
+    console.log(`User registered for global notifications: user_${userId}`);
+  });
+
   socket.on('send_message', async (data) => {
     const { group, sender, content, fileUrl, fileType, replyTo } = data;
     try {
@@ -99,8 +105,20 @@ io.on('connection', (socket) => {
         });
 
       io.to(group).emit('receive_message', populatedMessage);
-      // Notify group members about new message for unread counts
-      io.to(group).emit('group_notification', { group, message: populatedMessage });
+      
+      // WhatsApp-style notifications: Emit to all members' personal rooms
+      const groupData = await Group.findById(group);
+      if (groupData) {
+        groupData.members.forEach(memberId => {
+          if (memberId.toString() !== sender.toString()) {
+            io.to(`user_${memberId}`).emit('group_notification', { 
+              groupName: groupData.name, 
+              groupId: group,
+              message: populatedMessage 
+            });
+          }
+        });
+      }
     } catch (err) {
       console.error('Error saving message:', err);
     }
